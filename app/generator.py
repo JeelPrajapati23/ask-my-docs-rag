@@ -4,40 +4,64 @@ from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-
 load_dotenv()
 
+#Same fast model for both generation and evaluation
 llm = ChatGroq(
     model="llama-3.1-8b-instant", 
-    temperature=0, # Set to 0 to prevent hallucinations and strictly follow facts
+    temperature=0, 
     api_key=os.getenv("GROQ_API_KEY")
 )
 
-# The strict citation prompt template
-system_prompt = """You are a highly accurate expert assistant answering questions based STRICTLY on the provided documents.
-
-INSTRUCTIONS:
-1. Answer ONLY using the information found in the sources below. 
-2. If the answer is not contained in the sources, you must reply: "I cannot answer this based on the provided documents." Do not guess.
-3. For EVERY claim or fact you state, you MUST cite the source.
-4. Format your citations at the end of the relevant sentence like this: [Source: filename.pdf, Page: X].
-
-CONTEXT:
-{context}"""
-
-# Assemble the prompt
-prompt = ChatPromptTemplate.from_messages([
-    ("system", system_prompt),
-    ("human", "{question}")
-])
-
-parser = StrOutputParser()
-
-rag_chain = prompt | llm | parser
+def load_prompt(filename="system_prompt_v1.txt"):
+    """Loads the system prompt from the version-controlled text file."""
+    prompt_path = os.path.join("prompts", filename)
+    with open(prompt_path, "r", encoding="utf-8") as file:
+        return file.read()
 
 def generate_answer(question: str, formatted_context: str):
     """Passes the formatted context and user question to the LLM."""
+    system_prompt = load_prompt()
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "{question}")
+    ])
+
+    parser = StrOutputParser()
+
+    rag_chain = prompt | llm | parser
+    
     return rag_chain.invoke({
         "context": formatted_context,
         "question": question
     })
+
+def check_faithfulness(question: str, context: str, generated_answer: str) -> bool:
+    """
+    Acts as an auditor. Returns True if the generated answer is strictly 
+    supported by the context, and False if it detects hallucinations.
+    """
+    eval_prompt_text = """You are a strict grading auditor. 
+    Compare the GENERATED ANSWER to the PROVIDED CONTEXT.
+    If the GENERATED ANSWER contains ANY facts, numbers, or claims that are NOT explicitly stated in the PROVIDED CONTEXT, you must output the word "FAIL".
+    If the GENERATED ANSWER is entirely supported by the PROVIDED CONTEXT, output the word "PASS".
+    
+    PROVIDED CONTEXT:
+    {context}
+    
+    GENERATED ANSWER:
+    {answer}
+    
+    Output ONLY "PASS" or "FAIL". Do not explain."""
+    
+    eval_prompt = ChatPromptTemplate.from_template(eval_prompt_text)
+    parser = StrOutputParser()
+    eval_chain = eval_prompt | llm | parser
+    
+    result = eval_chain.invoke({
+        "context": context,
+        "answer": generated_answer
+    })
+    
+    return "PASS" in result.strip().upper()
