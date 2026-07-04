@@ -1,0 +1,69 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: askmydocs
+    # Host port 5433, not Postgres's usual 5432 — avoids clashing with a native
+    # Postgres install some dev machines already run (this one included).
+    # Doesn't affect backend<->postgres traffic, which stays on the internal
+    # Docker network at the standard port 5432 regardless.
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/askmydocs
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      COHERE_API_KEY: ${COHERE_API_KEY}
+      RAG_SYSTEM_PROMPT_FILE: ${RAG_SYSTEM_PROMPT_FILE:-system_prompt_v3.txt}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set — see .env}
+      APP_URL: ${APP_URL:-http://localhost:8000}
+      APP_FRONTEND_URL: ${APP_FRONTEND_URL:-http://localhost:5173}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      FROM_EMAIL: ${FROM_EMAIL:-noreply@askmydocs.local}
+    volumes:
+      - ./uploaded_files:/app/uploaded_files
+      - ./logs:/app/logs
+    depends_on:
+      - qdrant
+      - postgres
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./Frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${APP_URL:-http://localhost:8000}
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  qdrant_storage:
+  postgres_data:

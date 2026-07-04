@@ -1,0 +1,15 @@
+name: Reset demo account
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # every hour, on the hour
+  workflow_dispatch: {}    # allow manual triggering from the Actions tab
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call /demo/reset
+        run: |
+          curl -sf -X POST "${{ secrets.DEMO_APP_URL }}/demo/reset" \
+            -H "X-Reset-Secret: ${{ secrets.DEMO_RESET_SECRET }}"

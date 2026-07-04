@@ -2,6 +2,7 @@
 .venv/
 venv/
 env/
+myenv/
 __pycache__/
 *.pyc
 
@@ -11,5 +12,22 @@ __pycache__/
 # Ignore uploaded test files
 app/test_pdfs/
 
-# Local Vector Database Storage 
+# Local Vector Database Storage
 qdrant_db/
+
+# Leftover SQLite auth DB from before the Postgres migration — unused by the
+# app now, but still has real password hashes in it, so keep it out of git.
+auth.db
+
+# User-uploaded documents (potentially confidential)
+uploaded_files/
+
+# Logs
+logs/
+*.log*
+
+# Raw CUAD dataset used to build the eval golden set (40MB, publicly re-downloadable)
+Evaluation/CUAD_v1.json
+
+# Claude Code project instructions (local AI-assistant context, not part of the app)
+CLAUDE.md

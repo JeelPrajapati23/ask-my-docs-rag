@@ -1,0 +1,26 @@
+.git/
+.gitignore
+.env
+*.md
+
+# Python
+myenv/
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# App runtime data — populated inside the container/volumes, not baked into the image
+auth.db
+uploaded_files/
+logs/
+*.log*
+qdrant_db/
+
+# Not needed in the backend image
+ingestion-docs/
+Evaluation/
+Designs/
+Frontend/node_modules/
+Frontend/dist/
+scratch_sf.json
