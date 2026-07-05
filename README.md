@@ -1,8 +1,10 @@
 # ClauseIQ — Multi-Tenant RAG for Legal Documents
 
+**Live**: [clauseiq-rag.vercel.app](https://clauseiq-rag.vercel.app)
+
 A full-stack Retrieval-Augmented Generation (RAG) system for question-answering and cross-document comparison over legal PDFs (contracts, agreements, licenses). Each user gets an isolated, authenticated workspace — upload your own documents, ask questions grounded strictly in their content, or compare multiple contracts side by side, with every answer checked for faithfulness before it reaches the user.
 
-Built as an end-to-end system: FastAPI backend, Qdrant hybrid search + Cohere reranking, Postgres-backed auth, a React chat UI, Docker orchestration, and an offline Ragas evaluation harness — not just a notebook demo.
+Built as an end-to-end system: FastAPI backend, Qdrant hybrid search + Cohere reranking, Postgres-backed auth, a React chat UI, Docker orchestration, a deployed production stack with CI/CD, and an offline Ragas evaluation harness — not just a notebook demo.
 
 ---
 
@@ -18,6 +20,7 @@ Built as an end-to-end system: FastAPI backend, Qdrant hybrid search + Cohere re
   - [Run with Docker Compose](#run-with-docker-compose-recommended)
   - [Run Locally (without Docker)](#run-locally-without-docker)
 - [Using the App](#using-the-app)
+- [Production Deployment](#production-deployment)
 - [Evaluation Results](#evaluation-results)
 - [Security Highlights](#security-highlights)
 - [Design Decisions](#design-decisions)
@@ -45,6 +48,8 @@ Built as an end-to-end system: FastAPI backend, Qdrant hybrid search + Cohere re
 
 **Engineering**
 - Dockerized end-to-end (backend, frontend, Qdrant, Postgres) via a single `docker compose up`.
+- Deployed to production: Vercel (frontend) + Azure Container Apps (backend) + Neon (Postgres) + Qdrant Cloud, with GitHub Actions CI/CD redeploying the backend on every push to `main`.
+- Frontend and backend on different domains are made same-origin via a Vercel rewrite proxy (`/api/*` → Azure), so the auth cookie survives strict cross-site tracking protections (Brave Shields, Safari ITP, Firefox strict mode) without a token-in-header rewrite.
 - Offline evaluation harness (Ragas, judged locally via Ollama) that exercises the *real* production pipeline against a golden question set derived from the CUAD legal-contracts dataset.
 
 ---
@@ -136,6 +141,8 @@ flowchart TB
 | Frontend | React 19, Vite, Tailwind CSS, `react-markdown` |
 | Evaluation | Ragas, judged offline by a local Ollama model (`llama3.1:8b`) |
 | Containerization | Docker, Docker Compose |
+| Deployment | Vercel (frontend, with a rewrite proxy to the backend), Azure Container Apps (backend), Neon (Postgres), Qdrant Cloud |
+| CI/CD | GitHub Actions — builds and pushes the backend image, updates the Container App on every push to `main` |
 
 ---
 
@@ -151,10 +158,11 @@ ask-my-docs-rag/
 │   ├── generator.py            # Groq streaming, intent classification, faithfulness verification
 │   ├── compare.py               # Multi-document MMR retrieval + comparison prompt + SSE
 │   ├── batch_index.py           # Standalone bulk-indexer for ingestion-docs/ (full collection wipe)
-│   ├── rate_limit.py             # Shared slowapi Limiter
+│   ├── create_qdrant_indexes.py # One-off backfill: Qdrant Cloud payload indexes on a pre-existing collection
+│   ├── rate_limit.py             # Shared slowapi Limiter, keyed by real client IP (X-Forwarded-For aware)
 │   └── auth/
 │       ├── models.py            # User, AuditLog SQLAlchemy models
-│       ├── db.py                # Postgres engine, migrations
+│       ├── db.py                # Postgres engine (pool_pre_ping for Neon), migrations
 │       ├── router.py            # register/login/logout/forgot/reset/change-password
 │       ├── dependencies.py      # require_active_user, require_admin guards
 │       ├── utils.py             # bcrypt + JWT helpers, ENVIRONMENT flag
@@ -166,7 +174,13 @@ ask-my-docs-rag/
 │   │   ├── App.jsx              # Auth-gated root
 │   │   ├── components/          # Auth, AdminPanel, FileChip, ResetPasswordModal, icons
 │   │   └── utils/                # api.js (API_BASE_URL), storage.js
+│   ├── vercel.json               # Rewrites /api/* to the Azure backend (same-origin proxy)
 │   └── Dockerfile               # Multi-stage Vite build -> nginx
+├── deploy/azure/
+│   ├── bootstrap.sh              # One-time az CLI provisioning of the prod backend
+│   └── .env.azure.example        # Template for bootstrap.sh's secrets (real file is gitignored)
+├── .github/workflows/
+│   └── deploy-backend.yml        # CI/CD: builds + deploys the backend on push to main
 ├── Evaluation/
 │   ├── golden_qa_set.json        # Intent-tagged golden Q&A set (factual/analytical/out-of-scope)
 │   ├── golden_doc_map.json       # source_row -> originating contract map
@@ -203,10 +217,11 @@ RAG_SYSTEM_PROMPT_FILE=system_prompt_v3.txt   # optional, defaults to v3
 ENVIRONMENT=development                        # "production" enforces JWT_SECRET_KEY + secure cookies
 JWT_SECRET_KEY=...                             # required in production
 DATABASE_URL=postgresql://postgres:postgres@localhost:5433/clauseiq
-APP_URL=http://localhost:8000                  # backend origin (also baked into the frontend build as VITE_API_URL)
+APP_URL=http://localhost:8000                  # backend origin (also baked into the frontend build as VITE_API_URL — unused in production, see below)
 APP_FRONTEND_URL=http://localhost:5173         # used to build password-reset redirect links
 CORS_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:5174
-QDRANT_URL=http://localhost:6333
+QDRANT_URL=http://localhost:6333               # or a Qdrant Cloud cluster URL in production
+QDRANT_API_KEY=                                # required by Qdrant Cloud; leave unset for a local instance
 
 # Optional — LangSmith tracing (off if unset)
 LANGCHAIN_TRACING_V2=true
@@ -276,6 +291,27 @@ python app/batch_index.py
 
 ---
 
+## Production Deployment
+
+The live app runs across four separate managed services rather than a single host:
+
+| Service | Provider | Notes |
+|---|---|---|
+| Frontend | Vercel | Auto-deployed from `main` via Vercel's GitHub integration |
+| Backend | Azure Container Apps | `min-replicas=0` to conserve free/student credit — first request after idle is a cold start |
+| Relational DB | Neon (serverless Postgres) | `users`, `audit_logs` |
+| Vector DB | Qdrant Cloud | `pdf_knowledge_base` collection |
+
+**Same-origin cookie auth across two domains.** The frontend (`clauseiq-rag.vercel.app`) and backend (an Azure Container Apps FQDN) are on different domains, which normally forces the auth cookie to be `SameSite=None; Secure` — and strict cross-site tracking protections (Brave Shields, Safari ITP, Firefox strict mode) block `SameSite=None` cookies outright, regardless of `Secure`. Instead of switching to a token-in-header scheme, `Frontend/vercel.json` proxies `/api/*` through to the Azure backend, so the browser sees every API call as same-origin — letting the cookie use `SameSite=Lax`, which those browsers don't block. Vercel's external rewrite is a genuine reverse-proxy pass-through (not the older, buffered Vercel Functions streaming model), but it does impose a hard **120-second timeout** on any single proxied request — worth knowing if you extend `/compare/` to cover many large documents at once.
+
+**CI/CD.** `.github/workflows/deploy-backend.yml` runs on every push to `main` that touches backend code: it builds the Docker image locally on the GitHub-hosted runner (Azure's ACR Tasks build service is disabled on free/student subscriptions), pushes it to Azure Container Registry, and updates the running Container App to the new image. The frontend has no separate workflow — Vercel deploys it independently on every push. One-time infrastructure provisioning (resource group, registry, Container Apps environment) lives in `deploy/azure/bootstrap.sh` and is idempotent.
+
+**Two managed-cloud gotchas worth knowing if you fork this:**
+- **Neon closes idle Postgres connections server-side.** Without `pool_pre_ping=True` on the SQLAlchemy engine, the first query after any idle period fails with `OperationalError: SSL connection has been closed unexpectedly` instead of transparently reconnecting.
+- **Qdrant Cloud rejects filtered queries on a field with no payload index** (`Index required but not found`), unlike a local/unauthenticated Qdrant instance. `ensure_payload_indexes()` creates the required indexes on every write; `app/create_qdrant_indexes.py` backfills them on a collection that already had data before that fix existed.
+
+---
+
 ## Evaluation Results
 
 The eval harness runs the **actual production pipeline** (same retriever/generator code as the live API) against a golden question set derived from [CUAD](https://www.atticusprojectai.org/cuad) (real-world commercial legal contracts), scored offline via Ragas with a local Ollama judge (`llama3.1:8b`) — no eval traffic hits Groq/Cohere for scoring.
@@ -313,12 +349,12 @@ python evaluate_rag_offline.py   # resumable — skips source_rows already in th
 ## Security Highlights
 
 - Per-user data isolation enforced at the Qdrant filter level on every retrieval, index, and delete — no cross-tenant access path exists.
-- httponly JWT cookies (no token-in-header/localStorage flow), CSP + security headers on every response, HSTS in production.
-- Per-IP rate limiting (`slowapi`) **and** independent per-account login lockout after repeated failures.
+- httponly JWT cookies (no token-in-header/localStorage flow), CSP + security headers on every response, HSTS in production. `SameSite=Lax` in production, made possible by proxying the frontend and backend to the same origin (see [Production Deployment](#production-deployment)) rather than relying on `SameSite=None`, which strict tracking-protection browsers block outright.
+- Per-IP rate limiting (`slowapi`) **and** independent per-account login lockout after repeated failures. The rate limiter and audit log both resolve the real client IP from `X-Forwarded-For` rather than the raw TCP peer — necessary because a reverse-proxied deployment (Vercel → Azure Container Apps ingress) otherwise makes every request appear to originate from the same internal ingress IP, collapsing per-IP limits into one shared, global limit.
 - Uploaded/deleted filenames are sanitized to a bare basename before touching the filesystem — no path traversal.
 - Request bodies are size-capped (question/history length, filter list sizes) to bound LLM cost and context abuse.
 - Unexpected server errors are logged internally and never leak raw exception details to the client.
-- Full audit log of every meaningful account and data action.
+- Full audit log of every meaningful account and data action, including real client IP.
 
 ---
 
@@ -328,3 +364,5 @@ python evaluate_rag_offline.py   # resumable — skips source_rows already in th
 - **Two-call, claim-level faithfulness verification** — a single "is this faithful, yes/no" LLM call is too coarse and self-serving; extracting claims *before* showing context (to avoid bias) and checking each one individually against retrieved text gives a much more granular, auditable faithfulness score.
 - **Intent-based routing over one-size-fits-all retrieval** — analytical/advisory questions need more supporting context than narrow factual lookups; a keyword classifier (not an extra LLM call) makes this routing free.
 - **Incremental per-user indexing vs. full bulk reindex** — the live upload path only touches the affected user's `(user_id, source_file)` pair; the standalone `batch_index.py` script is intentionally separate and destructive, reserved for offline corpus loading.
+- **Same-origin proxy over token-in-header auth** — cross-domain deployment (Vercel + Azure) usually pushes people toward moving the JWT out of a cookie and into an `Authorization` header to sidestep `SameSite` entirely. Instead, a Vercel rewrite proxy makes the two origins look identical to the browser, keeping the simpler httponly-cookie model and its XSS-exfiltration resistance, at the cost of a 120-second timeout on any single proxied request.
+- **Proxy-aware client IP over trusting `request.client.host`** — any reverse-proxied deployment (here: Vercel → Azure Container Apps ingress) makes the TCP-level peer address useless for per-visitor rate limiting or audit attribution, since it's always the last proxy's own IP. Reading the leftmost `X-Forwarded-For` entry fixes the common case; it's knowingly spoofable by a request sent directly to the backend's own public FQDN, which is an accepted tradeoff at this app's scale rather than a fully hop-counted, spoof-proof implementation.
