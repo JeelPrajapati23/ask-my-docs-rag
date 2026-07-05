@@ -1,14 +1,12 @@
 import uuid
-import os
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from app.auth.db import get_db
 from app.auth.models import User, AuditLog
 from app.auth.schemas import RegisterRequest, LoginRequest, UserResponse, ForgotPasswordRequest, ResetPasswordRequest, ChangePasswordRequest
 from app.auth.utils import hash_password, verify_password, create_access_token, ENVIRONMENT
-from app.auth.email_utils import send_verification_email, send_reset_email
+from app.auth.email_utils import send_reset_email
 from app.auth.dependencies import get_current_user
 from app.rate_limit import limiter
 
@@ -16,7 +14,6 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 COOKIE_NAME = "access_token"
 COOKIE_MAX_AGE = 8 * 3600
-APP_FRONTEND_URL = os.getenv("APP_FRONTEND_URL", "http://localhost:5173")
 MAX_FAILED_LOGIN_ATTEMPTS = 5
 LOCKOUT_MINUTES = 15
 
@@ -34,39 +31,19 @@ def register(body: RegisterRequest, request: Request, db: Session = Depends(get_
     if len(body.password) < 8:
         raise HTTPException(400, "Password must be at least 8 characters")
     is_first_user = db.query(User).count() == 0
-    token = str(uuid.uuid4())
     user = User(
         email=body.email,
         hashed_password=hash_password(body.password),
-        verification_token=token,
         role="admin" if is_first_user else "user",
-        is_verified=is_first_user,  # first user (admin) auto-verified
     )
     db.add(user)
     db.commit()
     db.refresh(user)
-    if not is_first_user:
-        try:
-            send_verification_email(user.email, token)
-        except Exception:
-            pass
     _log(db, "register", user_id=user.id, detail=user.email,
          ip=request.client.host if request.client else None)
     if is_first_user:
         return {"message": "Admin account created. You can log in immediately.", "is_admin": True}
-    return {"message": "Check your email for a verification link before logging in.", "is_admin": False}
-
-
-@router.get("/verify-email")
-def verify_email(token: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.verification_token == token).first()
-    if not user:
-        return RedirectResponse(url=f"{APP_FRONTEND_URL}?verified=error")
-    user.is_verified = True
-    user.verification_token = None
-    db.commit()
-    _log(db, "verify_email", user_id=user.id)
-    return RedirectResponse(url=f"{APP_FRONTEND_URL}?verified=true")
+    return {"message": "Account created. You can log in now.", "is_admin": False}
 
 
 @router.post("/login")
@@ -93,8 +70,6 @@ def login(body: LoginRequest, request: Request, response: Response, db: Session 
         raise HTTPException(401, "Invalid email or password")
     if not user.is_active:
         raise HTTPException(403, "Account is deactivated. Contact an administrator.")
-    if not user.is_verified:
-        raise HTTPException(403, "Please verify your email before logging in.")
 
     user.failed_login_attempts = 0
     user.locked_until = None

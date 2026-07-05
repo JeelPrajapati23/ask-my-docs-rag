@@ -14,9 +14,8 @@ const T = {
 const api = (path, opts) =>
   fetch(`${API_BASE_URL}${path}`, { credentials: "include", ...opts });
 
-function Badge({ active, verified }) {
+function Badge({ active }) {
   if (!active) return <span style={{ fontFamily: T.mono, fontSize: 10, color: "#f87171", border: "1px solid rgba(248,113,113,0.3)", borderRadius: 4, padding: "1px 6px" }}>deactivated</span>;
-  if (!verified) return <span style={{ fontFamily: T.mono, fontSize: 10, color: "#fbbf24", border: "1px solid rgba(251,191,36,0.3)", borderRadius: 4, padding: "1px 6px" }}>unverified</span>;
   return <span style={{ fontFamily: T.mono, fontSize: 10, color: T.accent, border: `1px solid rgba(198,242,74,0.3)`, borderRadius: 4, padding: "1px 6px" }}>active</span>;
 }
 
@@ -110,7 +109,7 @@ export default function AdminPanel({ onClose }) {
                         <span style={{ fontFamily: T.mono, fontSize: 10, color: T.accent,
                           border: `1px solid rgba(198,242,74,0.3)`, borderRadius: 4, padding: "1px 6px", flexShrink: 0 }}>admin</span>
                       )}
-                      <Badge active={u.is_active} verified={u.is_verified} />
+                      <Badge active={u.is_active} />
                     </div>
                     <div style={{ fontFamily: T.mono, fontSize: 10.5, color: T.muted }}>
                       {new Date(u.created_at).toLocaleDateString()} · {u.id.slice(0, 8)}…

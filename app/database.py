@@ -197,23 +197,6 @@ def delete_user_document(source_file: str, user_id: str, collection_name="pdf_kn
     return deleted
 
 
-def delete_all_user_documents(user_id: str, collection_name="pdf_knowledge_base") -> int:
-    """
-    Delete every Qdrant point that belongs to *user_id*, regardless of source_file.
-    Used by the shared demo-account reset job (see /demo/reset in main.py) to wipe
-    all of that account's uploads in one call.
-    """
-    client = QdrantClient(url=QDRANT_URL)
-    deleted = _delete_points_by_filter(
-        client,
-        collection_name,
-        Filter(must=[FieldCondition(key="metadata.user_id", match=MatchValue(value=user_id))]),
-    )
-    if deleted:
-        invalidate_bm25_cache()
-    return deleted
-
-
 def query_vector_db(query: str, k: int = 4, collection_name: str = "pdf_knowledge_base"):
     qdrant = QdrantVectorStore.from_existing_collection(
         embedding=embeddings,

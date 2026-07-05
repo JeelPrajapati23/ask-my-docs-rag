@@ -15,8 +15,6 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     role = Column(String, default="user")  # "user" | "admin"
     is_active = Column(Boolean, default=True)
-    is_verified = Column(Boolean, default=False)
-    verification_token = Column(String, nullable=True, unique=True)
     reset_token = Column(String, nullable=True)
     reset_token_expiry = Column(DateTime, nullable=True)
     failed_login_attempts = Column(Integer, default=0)

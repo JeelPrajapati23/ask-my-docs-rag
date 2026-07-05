@@ -28,18 +28,18 @@ _REFUSAL_MARKERS = (
 )
 
 from app.loader import process_pdf
-from app.database import save_chunks_to_vector_db, get_reranking_retriever, delete_user_document, delete_all_user_documents, attribute_answer_to_parents, QDRANT_URL
+from app.database import save_chunks_to_vector_db, get_reranking_retriever, delete_user_document, attribute_answer_to_parents, QDRANT_URL
 from pydantic import BaseModel, Field, field_validator
 from app.generator import stream_answer, verify_answer_claims, rephrase_question, needs_rephrasing, classify_intent, QueryIntent
 from groq import RateLimitError
 from app.compare import retrieve_per_doc, stream_comparison
 
-from app.auth.db import init_db, get_db, DEMO_EMAIL, DEMO_PASSWORD
+from app.auth.db import init_db, get_db
 from app.auth.models import User, AuditLog
 from app.auth.schemas import UserAdminItem, AuditLogItem
-from app.auth.dependencies import require_active_verified, require_admin
+from app.auth.dependencies import require_active_user, require_admin
 from app.auth.router import router as auth_router
-from app.auth.utils import ENVIRONMENT, hash_password
+from app.auth.utils import ENVIRONMENT
 from app.rate_limit import limiter
 from sqlalchemy.orm import Session
 from qdrant_client import QdrantClient
@@ -129,7 +129,7 @@ def _safe_filename(filename: str) -> str:
 async def upload_and_process_pdf(
     request: Request,
     file: UploadFile = File(...),
-    current_user: User = Depends(require_active_verified),
+    current_user: User = Depends(require_active_user),
     db: Session = Depends(get_db),
 ):
     safe_filename = _safe_filename(file.filename)
@@ -185,7 +185,7 @@ async def upload_and_process_pdf(
 @app.delete("/documents/{source_file:path}")
 async def delete_document(
     source_file: str,
-    current_user: User = Depends(require_active_verified),
+    current_user: User = Depends(require_active_user),
     db: Session = Depends(get_db),
 ):
     """Remove all indexed chunks for one document owned by the current user."""
@@ -229,7 +229,7 @@ class AskRequest(BaseModel):
 async def ask_question(
     request: Request,
     body: AskRequest,
-    current_user: User = Depends(require_active_verified),
+    current_user: User = Depends(require_active_user),
     db: Session = Depends(get_db),
 ):
     _log(db, "ask", user_id=current_user.id, detail=body.question[:200])
@@ -335,7 +335,7 @@ class CompareRequest(BaseModel):
 async def compare_documents(
     request: Request,
     body: CompareRequest,
-    current_user: User = Depends(require_active_verified),
+    current_user: User = Depends(require_active_user),
     db: Session = Depends(get_db),
 ):
     if len(body.doc_ids) < 2:
@@ -426,45 +426,3 @@ def admin_list_documents(admin: User = Depends(require_admin)):
     except Exception:
         logger.exception("admin/documents scan failed")
         raise HTTPException(500, "Failed to list documents.")
-
-
-# ── Demo Account Reset ────────────────────────────────────────────────────────
-# Scheduled externally (e.g. a GitHub Actions cron hitting this endpoint hourly —
-# see .github/workflows/reset-demo.yml). Deliberately its own secret rather than
-# an admin JWT: a cron job shouldn't need a full admin session that expires every
-# 8h, and this endpoint can only ever touch the one seeded demo account.
-#
-# Runs as a normal request inside the live API process (not a standalone script)
-# specifically so invalidate_bm25_cache() — called inside delete_all_user_documents
-# — actually takes effect. The BM25 cache is per-process in-memory; a separate cron
-# process touching Qdrant/Postgres directly could never invalidate it.
-DEMO_RESET_SECRET = os.getenv("DEMO_RESET_SECRET")
-
-
-@app.post("/demo/reset")
-def reset_demo_account(request: Request, db: Session = Depends(get_db)):
-    if not DEMO_RESET_SECRET:
-        raise HTTPException(503, "Demo reset is not configured.")
-    if request.headers.get("X-Reset-Secret") != DEMO_RESET_SECRET:
-        raise HTTPException(403, "Invalid reset secret.")
-
-    demo_user = db.query(User).filter(User.email == DEMO_EMAIL).first()
-    if not demo_user:
-        raise HTTPException(404, "Demo account does not exist.")
-
-    deleted = delete_all_user_documents(user_id=demo_user.id)
-
-    demo_dir = os.path.join(UPLOAD_DIR, demo_user.id)
-    if os.path.isdir(demo_dir):
-        shutil.rmtree(demo_dir)
-
-    # Reset account state in case a visitor changed the password or triggered a lockout
-    demo_user.hashed_password = hash_password(DEMO_PASSWORD)
-    demo_user.is_active = True
-    demo_user.is_verified = True
-    demo_user.failed_login_attempts = 0
-    demo_user.locked_until = None
-    db.commit()
-
-    _log(db, "demo_reset", user_id=demo_user.id, detail=f"{deleted} qdrant points removed")
-    return {"message": "Demo account reset.", "documents_removed": deleted}

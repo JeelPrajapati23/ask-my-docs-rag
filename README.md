@@ -37,12 +37,11 @@ Built as an end-to-end system: FastAPI backend, Qdrant hybrid search + Cohere re
 - **Guardrails** — if no relevant context is retrieved, a canned refusal is streamed with zero LLM calls; refusal-paraphrase detection prevents a "confident-sounding non-answer" from being mis-verified as faithful.
 
 **Multi-Tenancy & Auth**
-- JWT-cookie authentication (httponly, 8h expiry) backed by Postgres, with email verification, password reset, and per-account login lockout after repeated failures.
+- JWT-cookie authentication (httponly, 8h expiry) backed by Postgres, with password reset and per-account login lockout after repeated failures.
 - Every document and every Qdrant vector is scoped to `user_id` — no cross-user data access anywhere in ask/compare/delete.
 - Admin panel: user activation/deactivation, audit log viewer, cross-tenant document inventory.
 - Full audit trail (`audit_logs` table) for register/login/logout/upload/ask/compare/delete/admin actions.
 - Rate limiting (per-IP) and per-account lockout as independent defenses against brute force.
-- A shared, hourly-reset **public demo account** so reviewers can try the app without registering.
 
 **Engineering**
 - Dockerized end-to-end (backend, frontend, Qdrant, Postgres) via a single `docker compose up`.
@@ -155,9 +154,9 @@ ask-my-docs-rag/
 │   ├── rate_limit.py             # Shared slowapi Limiter
 │   └── auth/
 │       ├── models.py            # User, AuditLog SQLAlchemy models
-│       ├── db.py                # Postgres engine, migrations, demo-account seeding
-│       ├── router.py            # register/login/logout/verify/forgot/reset/change-password
-│       ├── dependencies.py      # require_active_verified, require_admin guards
+│       ├── db.py                # Postgres engine, migrations
+│       ├── router.py            # register/login/logout/forgot/reset/change-password
+│       ├── dependencies.py      # require_active_user, require_admin guards
 │       ├── utils.py             # bcrypt + JWT helpers, ENVIRONMENT flag
 │       └── email_utils.py       # SMTP or console-log dev fallback
 ├── prompts/                      # Versioned system prompts (v1/v2/v3, analytical)
@@ -175,7 +174,6 @@ ask-my-docs-rag/
 │   ├── ragas_eval_results_scoped.csv   # Current, final results (66 rows)
 │   └── build_golden_set.py, build_golden_doc_map.py, ...  # Golden set generation scripts
 ├── ingestion-docs/               # Sample legal PDFs for batch_index.py
-├── .github/workflows/reset-demo.yml   # Hourly cron resetting the shared demo account
 ├── Dockerfile                     # Backend image (python:3.11-slim, CPU-only torch)
 ├── docker-compose.yml             # Backend + frontend + Qdrant + Postgres
 └── requirements.txt
@@ -205,7 +203,7 @@ RAG_SYSTEM_PROMPT_FILE=system_prompt_v3.txt   # optional, defaults to v3
 ENVIRONMENT=development                        # "production" enforces JWT_SECRET_KEY + secure cookies
 JWT_SECRET_KEY=...                             # required in production
 DATABASE_URL=postgresql://postgres:postgres@localhost:5433/askmydocs
-APP_URL=http://localhost:8000                  # used to build email-verification links
+APP_URL=http://localhost:8000                  # backend origin (also baked into the frontend build as VITE_API_URL)
 APP_FRONTEND_URL=http://localhost:5173         # used to build password-reset redirect links
 CORS_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:5174
 QDRANT_URL=http://localhost:6333
@@ -215,15 +213,12 @@ LANGCHAIN_TRACING_V2=true
 LANGCHAIN_API_KEY=...
 LANGCHAIN_PROJECT=ask-my-docs-rag
 
-# Optional — Email (omit to print verification/reset links to console instead)
+# Optional — Email (omit to print password-reset links to console instead)
 SMTP_HOST=
 SMTP_PORT=587
 SMTP_USER=
 SMTP_PASS=
 FROM_EMAIL=noreply@askmydocs.local
-
-# Optional — demo account hourly reset endpoint
-DEMO_RESET_SECRET=...
 ```
 
 ### Run with Docker Compose (recommended)
@@ -273,7 +268,7 @@ python app/batch_index.py
 
 ## Using the App
 
-1. Register an account (first-ever user is auto-verified as admin) or click **Log in as Guest / Demo**.
+1. Register an account with just an email and password (the first-ever user becomes admin).
 2. Upload one or more PDFs — indexing happens immediately on file select.
 3. **Ask** questions grounded in your uploaded documents; answers stream in with cited sources and a faithfulness verdict.
 4. Select 2+ documents and switch to **Compare** mode to get a structured, per-document analysis of the same question.
@@ -333,4 +328,3 @@ python evaluate_rag_offline.py   # resumable — skips source_rows already in th
 - **Two-call, claim-level faithfulness verification** — a single "is this faithful, yes/no" LLM call is too coarse and self-serving; extracting claims *before* showing context (to avoid bias) and checking each one individually against retrieved text gives a much more granular, auditable faithfulness score.
 - **Intent-based routing over one-size-fits-all retrieval** — analytical/advisory questions need more supporting context than narrow factual lookups; a keyword classifier (not an extra LLM call) makes this routing free.
 - **Incremental per-user indexing vs. full bulk reindex** — the live upload path only touches the affected user's `(user_id, source_file)` pair; the standalone `batch_index.py` script is intentionally separate and destructive, reserved for offline corpus loading.
-- **Shared, auto-resetting demo account** — lets reviewers try the full authenticated experience without registering, while a scheduled `/demo/reset` endpoint (run in-process, not a standalone script) keeps it clean and prevents any one visitor from locking it out for everyone else.

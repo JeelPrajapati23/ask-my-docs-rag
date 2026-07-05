@@ -1,9 +1,5 @@
-import { useState, useEffect } from "react";
-import { API_BASE_URL, DEMO_EMAIL } from "../utils/api.js";
-
-// Kept in sync with app/auth/db.py's DEMO_PASSWORD manually (frontend/backend
-// are separate processes).
-const DEMO_PASSWORD = "DemoPass123!";
+import { useState } from "react";
+import { API_BASE_URL } from "../utils/api.js";
 
 const T = {
   bg: "#0a0b0d", panel: "#101216", panel2: "#15181d", field: "#0c0e11",
@@ -23,18 +19,6 @@ export default function Auth({ onLogin, initialResetToken }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const verified = params.get("verified");
-    if (verified === "true") {
-      setSuccess("Email verified! You can now log in.");
-      window.history.replaceState({}, "", "/");
-    } else if (verified === "error") {
-      setError("Verification link is invalid or expired.");
-      window.history.replaceState({}, "", "/");
-    }
-  }, []);
 
   const switchMode = (next) => {
     setMode(next);
@@ -64,45 +48,19 @@ export default function Auth({ onLogin, initialResetToken }) {
       if (!res.ok) { setError(data.detail || "Something went wrong."); return; }
       if (mode === "register") {
         setSuccess(data.message);
-        if (data.is_admin) {
-          const loginRes = await fetch(`${API_BASE_URL}/auth/login`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify({ email: email.trim(), password }),
-          });
-          if (loginRes.ok) {
-            const loginData = await loginRes.json();
-            onLogin({ id: loginData.id, email: loginData.email, role: loginData.role });
-          }
+        const loginRes = await fetch(`${API_BASE_URL}/auth/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ email: email.trim(), password }),
+        });
+        if (loginRes.ok) {
+          const loginData = await loginRes.json();
+          onLogin({ id: loginData.id, email: loginData.email, role: loginData.role });
         }
       } else {
         onLogin({ id: data.id, email: data.email, role: data.role });
       }
-    } catch {
-      setError("Cannot reach the backend. Make sure the API is running.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // ── Demo login ────────────────────────────────────────────────────────────
-  const handleDemoLogin = async () => {
-    setError("");
-    setSuccess("");
-    setEmail(DEMO_EMAIL);
-    setPassword(DEMO_PASSWORD);
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE_URL}/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ email: DEMO_EMAIL, password: DEMO_PASSWORD }),
-      });
-      const data = await res.json();
-      if (!res.ok) { setError(data.detail || "Could not log in to the demo account."); return; }
-      onLogin({ id: data.id, email: data.email, role: data.role });
     } catch {
       setError("Cannot reach the backend. Make sure the API is running.");
     } finally {
@@ -296,28 +254,6 @@ export default function Auth({ onLogin, initialResetToken }) {
                   cursor: loading ? "default" : "pointer", transition: "filter .14s, background .14s" }}>
                 {loading ? "Please wait…" : mode === "login" ? "Sign In" : "Create Account"}
               </button>
-
-              {mode === "login" && (
-                <>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "18px 0" }}>
-                    <div style={{ flex: 1, height: 1, background: T.border }} />
-                    <span style={{ fontFamily: T.mono, fontSize: 10.5, color: T.muted, letterSpacing: "0.08em" }}>OR</span>
-                    <div style={{ flex: 1, height: 1, background: T.border }} />
-                  </div>
-                  <button type="button" onClick={handleDemoLogin} disabled={loading} className="auth-btn-primary"
-                    style={{ width: "100%", padding: "11px 0", borderRadius: 9,
-                      background: "transparent",
-                      border: `1px solid ${T.accent}`,
-                      color: T.accent,
-                      fontFamily: T.sans, fontWeight: 600, fontSize: 14,
-                      cursor: loading ? "default" : "pointer", transition: "filter .14s, background .14s" }}>
-                    {loading ? "Please wait…" : "Log in as Guest / Demo"}
-                  </button>
-                  <p style={{ fontFamily: T.mono, fontSize: 10.5, color: T.muted, textAlign: "center", marginTop: 10, lineHeight: 1.5 }}>
-                    Skip sign-up — explore with a shared demo account.
-                  </p>
-                </>
-              )}
             </form>
           )}
 
@@ -394,7 +330,6 @@ export default function Auth({ onLogin, initialResetToken }) {
 
           {mode === "register" && (
             <p style={{ fontFamily: T.mono, fontSize: 11, color: T.muted, textAlign: "center", marginTop: 16, lineHeight: 1.6 }}>
-              After registering, check your email for a verification link.<br />
               The first account created becomes the admin.
             </p>
           )}

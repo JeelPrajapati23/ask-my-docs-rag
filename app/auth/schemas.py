@@ -18,7 +18,6 @@ class UserResponse(BaseModel):
     email: str
     role: str
     is_active: bool
-    is_verified: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -29,7 +28,6 @@ class UserAdminItem(BaseModel):
     email: str
     role: str
     is_active: bool
-    is_verified: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}

@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { nextId, formatBytes, relativeTime, loadSessions, saveSessions } from "./utils/storage.js";
-import { API_BASE_URL, DEMO_EMAIL } from "./utils/api.js";
+import { API_BASE_URL } from "./utils/api.js";
 import { IcPlus, IcSearch, IcUpload, IcArrow, IcDoc, IcClose, IcMenu, IcPage, IcCheck, IcAlert, IcChat, IcCopy, IcCopied, IcDots, IcPencil, IcTrash } from "./components/icons.jsx";
 import { FileChip, TypingDots } from "./components/FileChip.jsx";
 import AdminPanel from "./components/AdminPanel.jsx";
@@ -839,18 +839,6 @@ export default function Chat({ authUser, onLogout }) {
   return (
     <div style={{ position: "fixed", inset: 0, display: "flex", overflow: "hidden",
       background: T.bg, color: T.ink, fontFamily: T.sans, fontSize: 14 }}>
-
-      {authUser?.email === DEMO_EMAIL && (
-        <div style={{
-          position: "fixed", bottom: 10, left: "50%", transform: "translateX(-50%)",
-          zIndex: 50, background: T.panel2, border: `1px solid ${T.border2}`,
-          borderRadius: 20, padding: "6px 16px", fontFamily: T.mono, fontSize: 10.5,
-          color: T.muted, boxShadow: "0 4px 16px rgba(0,0,0,0.4)", pointerEvents: "none",
-          whiteSpace: "nowrap",
-        }}>
-          Note: this is a public demo account — data resets every hour
-        </div>
-      )}
 
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
