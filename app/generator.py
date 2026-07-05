@@ -62,6 +62,33 @@ def classify_intent(question: str) -> QueryIntent:
         return QueryIntent.ANALYTICAL
     return QueryIntent.FACT
 
+
+# Qdrant/BM25 retrieval always returns its top-k nearest chunks regardless of true
+# relevance (see ThresholdReranker's docstring in app/database.py), so a question with
+# zero relationship to the uploaded documents — e.g. a request for code — still reaches
+# the LLM with legal-document context attached. The system prompt asks the LLM to refuse
+# in that case, but a small instruction-following model can still answer a strongly
+# in-distribution request (like reversing a linked list) instead of refusing. This keyword
+# gate catches the obvious cases deterministically, before any retrieval or LLM call.
+_OFF_TOPIC_KEYWORDS = {
+    "write a python", "write python", "python function", "python code", "python script",
+    "javascript function", "javascript code", "write a function", "write code",
+    "write a program", "write an algorithm", "leetcode", "reverse a linked list",
+    "linked list", "binary search tree", "binary tree", "sort an array",
+    "fibonacci sequence", "sql query", "regex for", "regular expression for",
+    "write a regex", "html code", "css code", "for loop", "while loop",
+    "write a poem", "write an essay", "write a story", "write a song",
+    "recipe for", "joke about", "tell me a joke", "translate this to",
+    "capital of france", "write a sql",
+}
+
+
+def is_off_topic_request(question: str) -> bool:
+    """Cheap deterministic gate for requests unrelated to legal-document QA (code
+    generation, creative writing, general trivia) that retrieval alone can't filter out."""
+    q_lower = question.lower()
+    return any(kw in q_lower for kw in _OFF_TOPIC_KEYWORDS)
+
 # Instructor-patched raw Groq client — forces structured JSON output for verification
 _verifier = instructor.from_groq(
     Groq(api_key=os.getenv("GROQ_API_KEY")),

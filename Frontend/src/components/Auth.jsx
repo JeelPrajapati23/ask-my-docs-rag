@@ -60,6 +60,25 @@ export default function Auth({ onLogin, initialResetToken, initialNotice }) {
     setShowPw(false);
   };
 
+  // A successful /auth/login response only means the server issued a cookie —
+  // it doesn't mean the browser actually stored it (private browsing, "block all
+  // cookies", some in-app WebViews). Trusting the login response body alone let
+  // the UI move on to Chat and then bounce back with "session expired" on the
+  // very first authenticated request. Confirm the cookie round-trips before
+  // treating the user as signed in.
+  const confirmSession = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/auth/me`, { credentials: "include" });
+      return res.ok ? await res.json() : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const COOKIE_BLOCKED_MESSAGE =
+    "Signed in, but this browser blocked the session cookie, so you'd be signed out immediately. " +
+    "Disable private/incognito mode or strict cookie-blocking settings for this site, then try again.";
+
   // ── Login / Register ──────────────────────────────────────────────────────
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -87,8 +106,12 @@ export default function Auth({ onLogin, initialResetToken, initialNotice }) {
           body: JSON.stringify({ email: email.trim(), password }),
         });
         if (loginRes.ok) {
-          const loginData = await loginRes.json();
-          onLogin({ id: loginData.id, email: loginData.email, role: loginData.role });
+          const confirmed = await confirmSession();
+          if (confirmed) {
+            onLogin({ id: confirmed.id, email: confirmed.email, role: confirmed.role });
+          } else {
+            setError(COOKIE_BLOCKED_MESSAGE);
+          }
         } else {
           // Account was created, but the immediate follow-up sign-in failed (rate
           // limit, transient error, ...). Land on the login tab with the same
@@ -98,7 +121,12 @@ export default function Auth({ onLogin, initialResetToken, initialNotice }) {
           setMode("login");
         }
       } else {
-        onLogin({ id: data.id, email: data.email, role: data.role });
+        const confirmed = await confirmSession();
+        if (confirmed) {
+          onLogin({ id: confirmed.id, email: confirmed.email, role: confirmed.role });
+        } else {
+          setError(COOKIE_BLOCKED_MESSAGE);
+        }
       }
     } catch {
       setError("Cannot reach the backend. Make sure the API is running.");

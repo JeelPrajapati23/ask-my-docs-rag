@@ -30,7 +30,7 @@ _REFUSAL_MARKERS = (
 from app.loader import process_pdf
 from app.database import save_chunks_to_vector_db, get_reranking_retriever, delete_user_document, attribute_answer_to_parents, QDRANT_URL, QDRANT_API_KEY
 from pydantic import BaseModel, Field, field_validator
-from app.generator import stream_answer, verify_answer_claims, rephrase_question, needs_rephrasing, classify_intent, QueryIntent
+from app.generator import stream_answer, verify_answer_claims, rephrase_question, needs_rephrasing, classify_intent, is_off_topic_request, QueryIntent
 from groq import RateLimitError
 from app.compare import retrieve_per_doc, stream_comparison
 
@@ -237,6 +237,13 @@ async def ask_question(
 
     def event_stream():
         try:
+            if is_off_topic_request(body.question):
+                canned = "I cannot answer this based on the provided documents. No relevant context was found."
+                yield f"data: {json.dumps({'type': 'token', 'content': canned})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'sources': []})}\n\n"
+                yield f"data: {json.dumps({'type': 'verification', 'verdict': 'PASS', 'score': 1.0, 'total_claims': 0, 'unverified_claims': [], 'is_faithful': True})}\n\n"
+                return
+
             intent = classify_intent(body.question)
             retriever = get_reranking_retriever(
                 user_id=current_user.id,
