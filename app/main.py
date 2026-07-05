@@ -40,7 +40,7 @@ from app.auth.schemas import UserAdminItem, AuditLogItem
 from app.auth.dependencies import require_active_user, require_admin
 from app.auth.router import router as auth_router
 from app.auth.utils import ENVIRONMENT
-from app.rate_limit import limiter
+from app.rate_limit import limiter, get_client_ip
 from sqlalchemy.orm import Session
 from qdrant_client import QdrantClient
 
@@ -171,7 +171,7 @@ async def upload_and_process_pdf(
     try:
         chunks = process_pdf(file_path)
         save_chunks_to_vector_db(chunks, user_id=current_user.id)
-        _log(db, "upload", user_id=current_user.id, detail=safe_filename)
+        _log(db, "upload", user_id=current_user.id, detail=safe_filename, ip=get_client_ip(request))
         return {
             "filename": safe_filename,
             "status": "Successfully chunked and embedded",
@@ -184,6 +184,7 @@ async def upload_and_process_pdf(
 
 @app.delete("/documents/{source_file:path}")
 async def delete_document(
+    request: Request,
     source_file: str,
     current_user: User = Depends(require_active_user),
     db: Session = Depends(get_db),
@@ -199,7 +200,7 @@ async def delete_document(
     physical = os.path.join(user_dir, safe_filename)
     if os.path.exists(physical):
         os.remove(physical)
-    _log(db, "delete_document", user_id=current_user.id, detail=safe_filename)
+    _log(db, "delete_document", user_id=current_user.id, detail=safe_filename, ip=get_client_ip(request))
     return {"deleted": safe_filename}
 
 
@@ -232,7 +233,7 @@ async def ask_question(
     current_user: User = Depends(require_active_user),
     db: Session = Depends(get_db),
 ):
-    _log(db, "ask", user_id=current_user.id, detail=body.question[:200])
+    _log(db, "ask", user_id=current_user.id, detail=body.question[:200], ip=get_client_ip(request))
 
     def event_stream():
         try:
@@ -344,7 +345,7 @@ async def compare_documents(
         raise HTTPException(400, "Query cannot be empty.")
 
     _log(db, "compare", user_id=current_user.id,
-         detail=f"{len(body.doc_ids)} docs · {body.query[:120]}")
+         detail=f"{len(body.doc_ids)} docs · {body.query[:120]}", ip=get_client_ip(request))
 
     per_doc = retrieve_per_doc(body.query, body.doc_ids, current_user.id)
 
@@ -367,6 +368,7 @@ def admin_list_users(
 
 @app.put("/admin/users/{user_id}/activate")
 def admin_activate_user(
+    request: Request,
     user_id: str,
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
@@ -376,12 +378,13 @@ def admin_activate_user(
         raise HTTPException(404, "User not found")
     user.is_active = True
     db.commit()
-    _log(db, "admin_activate", user_id=admin.id, detail=f"activated {user.email}")
+    _log(db, "admin_activate", user_id=admin.id, detail=f"activated {user.email}", ip=get_client_ip(request))
     return {"message": f"User {user.email} activated"}
 
 
 @app.put("/admin/users/{user_id}/deactivate")
 def admin_deactivate_user(
+    request: Request,
     user_id: str,
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
@@ -393,7 +396,7 @@ def admin_deactivate_user(
         raise HTTPException(400, "Cannot deactivate your own account")
     user.is_active = False
     db.commit()
-    _log(db, "admin_deactivate", user_id=admin.id, detail=f"deactivated {user.email}")
+    _log(db, "admin_deactivate", user_id=admin.id, detail=f"deactivated {user.email}", ip=get_client_ip(request))
     return {"message": f"User {user.email} deactivated"}
 
 

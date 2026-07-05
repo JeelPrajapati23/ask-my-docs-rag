@@ -9,7 +9,7 @@ from app.auth.schemas import RegisterRequest, LoginRequest, UserResponse, Forgot
 from app.auth.utils import hash_password, verify_password, create_access_token, ENVIRONMENT
 from app.auth.email_utils import send_reset_email
 from app.auth.dependencies import get_current_user
-from app.rate_limit import limiter
+from app.rate_limit import limiter, get_client_ip
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def register(body: RegisterRequest, request: Request, db: Session = Depends(get_
     db.commit()
     db.refresh(user)
     _log(db, "register", user_id=user.id, detail=user.email,
-         ip=request.client.host if request.client else None)
+         ip=get_client_ip(request))
     if is_first_user:
         return {"message": "Admin account created. You can log in immediately.", "is_admin": True}
     return {"message": "Account created. You can log in now.", "is_admin": False}
@@ -82,7 +82,7 @@ def login(body: LoginRequest, request: Request, response: Response, db: Session 
                 user.locked_until = datetime.utcnow() + timedelta(minutes=LOCKOUT_MINUTES)
                 user.failed_login_attempts = 0
                 _log(db, "login_locked", user_id=user.id,
-                     ip=request.client.host if request.client else None)
+                     ip=get_client_ip(request))
             db.commit()
         raise HTTPException(401, "Invalid email or password")
     if not user.is_active:
@@ -101,7 +101,7 @@ def login(body: LoginRequest, request: Request, response: Response, db: Session 
         samesite=COOKIE_SAMESITE,
         secure=COOKIE_SECURE,
     )
-    _log(db, "login", user_id=user.id, ip=request.client.host if request.client else None)
+    _log(db, "login", user_id=user.id, ip=get_client_ip(request))
     return {"message": "Logged in", "role": user.role, "email": user.email, "id": user.id}
 
 
@@ -134,7 +134,7 @@ def forgot_password(body: ForgotPasswordRequest, request: Request, db: Session =
             # generic message below to avoid user enumeration) — but log it, since this
             # used to fail completely silently and was impossible to debug.
             logger.exception("Failed to send password reset email to %s", user.email)
-        _log(db, "forgot_password", user_id=user.id, ip=request.client.host if request.client else None)
+        _log(db, "forgot_password", user_id=user.id, ip=get_client_ip(request))
     return {"message": "If that email is registered, a reset link has been sent."}
 
 
@@ -149,7 +149,7 @@ def reset_password(body: ResetPasswordRequest, request: Request, db: Session = D
     user.reset_token = None
     user.reset_token_expiry = None
     db.commit()
-    _log(db, "reset_password", user_id=user.id, ip=request.client.host if request.client else None)
+    _log(db, "reset_password", user_id=user.id, ip=get_client_ip(request))
     return {"message": "Password reset successfully. You can now log in."}
 
 
@@ -161,5 +161,5 @@ def change_password(body: ChangePasswordRequest, request: Request, current_user:
         raise HTTPException(401, "Current password is incorrect")
     current_user.hashed_password = hash_password(body.new_password)
     db.commit()
-    _log(db, "change_password", user_id=current_user.id, ip=request.client.host if request.client else None)
+    _log(db, "change_password", user_id=current_user.id, ip=get_client_ip(request))
     return {"message": "Password changed successfully."}
