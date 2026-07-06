@@ -89,6 +89,50 @@ def is_off_topic_request(question: str) -> bool:
     q_lower = question.lower()
     return any(kw in q_lower for kw in _OFF_TOPIC_KEYWORDS)
 
+
+# The keyword gate above only catches phrasings we thought to enumerate — it missed
+# open-domain questions (weather, sports, general trivia phrased without a keyword,
+# small talk) that testers asked in practice and got real answers to. This LLM gate is
+# the backstop: one fast classification call, before any retrieval, so an off-topic
+# question never reaches the document-QA prompt at all regardless of phrasing.
+_OFF_TOPIC_CLASSIFIER_PROMPT = """You are a strict binary classifier guarding a legal-document Q&A assistant.
+
+The assistant may ONLY answer questions that could plausibly be answered by looking inside a user-uploaded legal document (contracts, agreements, clauses, parties, obligations, dates, payment terms, termination conditions, definitions, etc.), including meta-questions about the conversation itself (e.g. "what did I just ask", "summarize this chat").
+
+Classify the question below as exactly one word:
+ON_TOPIC - could plausibly be answered from a legal document or refers to the current conversation/documents
+OFF_TOPIC - general knowledge, current events, coding, math, creative writing, personal/small talk, or anything else unrelated to reading a legal document
+
+Examples:
+Q: What is the termination notice period?
+A: ON_TOPIC
+
+Q: What's the capital of France?
+A: OFF_TOPIC
+
+Q: Who do you think will win the World Cup?
+A: OFF_TOPIC
+
+Q: Can you recommend a good recipe for dinner?
+A: OFF_TOPIC
+
+Q: Who are the parties to this agreement?
+A: ON_TOPIC
+
+Answer with exactly one word, ON_TOPIC or OFF_TOPIC, nothing else.
+
+Question: {question}
+Answer:"""
+
+
+def is_off_topic_llm(question: str) -> bool:
+    """LLM-backed backstop for the keyword gate: classifies whether a question is
+    unrelated to legal-document QA, catching phrasings the keyword list can't enumerate."""
+    messages = [HumanMessage(content=_OFF_TOPIC_CLASSIFIER_PROMPT.format(question=question))]
+    result = _invoke_with_retry(llm.invoke, messages)
+    verdict = result.content.strip().upper()
+    return verdict.startswith("OFF")
+
 # Instructor-patched raw Groq client — forces structured JSON output for verification
 _verifier = instructor.from_groq(
     Groq(api_key=os.getenv("GROQ_API_KEY")),

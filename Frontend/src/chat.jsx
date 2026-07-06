@@ -1212,7 +1212,7 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
                     ) : (
                       <div key={m.id} style={{ alignSelf: "flex-start", maxWidth: "84%" }}>
                         <div style={{ fontFamily: T.mono, fontSize: 10.5, color: T.accent,
-                          marginBottom: 8, letterSpacing: "0.08em" }}>AI</div>
+                          marginBottom: 8, letterSpacing: "0.08em" }}>ClauseIQ</div>
 
                         {m.isComparison && m.comparedDocs?.length > 0 && (
                           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
