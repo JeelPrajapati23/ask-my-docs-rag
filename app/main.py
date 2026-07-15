@@ -8,6 +8,7 @@ import json
 import logging
 import shutil
 import os
+from datetime import datetime
 from typing import List
 import fitz  # PyMuPDF — already a transitive dep via pdf_parser
 
@@ -35,8 +36,11 @@ from groq import RateLimitError
 from app.compare import retrieve_per_doc, stream_comparison
 
 from app.auth.db import init_db, get_db, SessionLocal
-from app.auth.models import User, AuditLog, DocumentJob
-from app.auth.schemas import UserAdminItem, AuditLogItem
+from app.auth.models import User, AuditLog, DocumentJob, ChatSession, ChatMessage
+from app.auth.schemas import (
+    UserAdminItem, AuditLogItem,
+    ChatSessionItem, ChatSessionDetail, ChatSessionCreateRequest, ChatSessionUpdateRequest,
+)
 from app.auth.dependencies import require_active_user, require_admin
 from app.auth.router import router as auth_router
 from app.auth.utils import ENVIRONMENT
@@ -112,6 +116,42 @@ def _format_page_range(pages: list) -> str:
 
 def _log(db: Session, action: str, user_id: str = None, detail: str = None, ip: str = None):
     db.add(AuditLog(user_id=user_id, action=action, detail=detail, ip_address=ip))
+    db.commit()
+
+
+def _get_owned_session(db: Session, session_id: str, user_id: str) -> ChatSession:
+    session = db.query(ChatSession).filter(
+        ChatSession.id == session_id, ChatSession.user_id == user_id
+    ).first()
+    if not session:
+        raise HTTPException(404, "Chat session not found.")
+    return session
+
+
+def _persist_chat_turn(
+    db: Session,
+    session_id: str,
+    user_id: str,
+    question: str,
+    answer: str,
+    citations: list = None,
+    verification: dict = None,
+    extra: dict = None,
+):
+    """Writes the user question + assistant answer as ChatMessage rows and bumps
+    the session's updated_at. Silently no-ops if session_id doesn't resolve to a
+    session owned by user_id (e.g. it was deleted mid-request)."""
+    session = db.query(ChatSession).filter(
+        ChatSession.id == session_id, ChatSession.user_id == user_id
+    ).first()
+    if not session:
+        return
+    db.add(ChatMessage(session_id=session_id, role="user", content=question))
+    db.add(ChatMessage(
+        session_id=session_id, role="assistant", content=answer,
+        citations=citations, verification=verification, extra=extra,
+    ))
+    session.updated_at = datetime.utcnow()
     db.commit()
 
 
@@ -254,6 +294,86 @@ async def delete_document(
     return {"deleted": safe_filename}
 
 
+# ── Chat Session Routes ────────────────────────────────────────────────────────
+
+@app.get("/sessions", response_model=List[ChatSessionItem])
+def list_sessions(
+    current_user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+):
+    return db.query(ChatSession).filter(
+        ChatSession.user_id == current_user.id
+    ).order_by(ChatSession.updated_at.desc()).all()
+
+
+@app.post("/sessions", response_model=ChatSessionItem)
+def create_session(
+    body: ChatSessionCreateRequest,
+    current_user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+):
+    session = ChatSession(
+        user_id=current_user.id,
+        name=body.name,
+        uploaded_files=body.uploaded_files,
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+@app.get("/sessions/{session_id}", response_model=ChatSessionDetail)
+def get_session(
+    session_id: str,
+    current_user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+):
+    session = _get_owned_session(db, session_id, current_user.id)
+    messages = db.query(ChatMessage).filter(
+        ChatMessage.session_id == session_id
+    ).order_by(ChatMessage.created_at.asc()).all()
+    return {
+        "id": session.id,
+        "name": session.name,
+        "uploaded_files": session.uploaded_files,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+        "messages": messages,
+    }
+
+
+@app.patch("/sessions/{session_id}", response_model=ChatSessionItem)
+def update_session(
+    session_id: str,
+    body: ChatSessionUpdateRequest,
+    current_user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+):
+    session = _get_owned_session(db, session_id, current_user.id)
+    if body.name is not None:
+        session.name = body.name
+    if body.uploaded_files is not None:
+        session.uploaded_files = body.uploaded_files
+    session.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+@app.delete("/sessions/{session_id}")
+def delete_session(
+    session_id: str,
+    current_user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+):
+    session = _get_owned_session(db, session_id, current_user.id)
+    db.query(ChatMessage).filter(ChatMessage.session_id == session_id).delete()
+    db.delete(session)
+    db.commit()
+    return {"deleted": session_id}
+
+
 MAX_QUESTION_LEN = 4000
 MAX_HISTORY_TURNS = 30
 MAX_HISTORY_TURN_LEN = 4000
@@ -264,6 +384,7 @@ class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=MAX_QUESTION_LEN)
     history: list = Field(default_factory=list, max_length=MAX_HISTORY_TURNS)
     document_filter: list = Field(default_factory=list, max_length=MAX_DOCUMENT_FILTER)
+    session_id: str | None = None
 
     @field_validator("history")
     @classmethod
@@ -284,6 +405,8 @@ async def ask_question(
     db: Session = Depends(get_db),
 ):
     _log(db, "ask", user_id=current_user.id, detail=body.question[:200], ip=get_client_ip(request))
+    if body.session_id:
+        _get_owned_session(db, body.session_id, current_user.id)  # 404s up front rather than mid-stream
 
     def event_stream():
         try:
@@ -292,6 +415,11 @@ async def ask_question(
                 yield f"data: {json.dumps({'type': 'token', 'content': canned})}\n\n"
                 yield f"data: {json.dumps({'type': 'done', 'sources': []})}\n\n"
                 yield f"data: {json.dumps({'type': 'verification', 'verdict': 'PASS', 'score': 1.0, 'total_claims': 0, 'unverified_claims': [], 'is_faithful': True})}\n\n"
+                if body.session_id:
+                    _persist_chat_turn(
+                        db, body.session_id, current_user.id, body.question, canned,
+                        citations=[], verification={"verdict": "PASS", "score": 1.0, "total_claims": 0, "unverified_claims": [], "is_faithful": True},
+                    )
                 return
 
             intent = classify_intent(body.question)
@@ -314,6 +442,11 @@ async def ask_question(
                 yield f"data: {json.dumps({'type': 'token', 'content': canned})}\n\n"
                 yield f"data: {json.dumps({'type': 'done', 'sources': []})}\n\n"
                 yield f"data: {json.dumps({'type': 'verification', 'verdict': 'PASS', 'score': 1.0, 'total_claims': 0, 'unverified_claims': [], 'is_faithful': True})}\n\n"
+                if body.session_id:
+                    _persist_chat_turn(
+                        db, body.session_id, current_user.id, body.question, canned,
+                        citations=[], verification={"verdict": "PASS", "score": 1.0, "total_claims": 0, "unverified_claims": [], "is_faithful": True},
+                    )
                 return
 
             # Build formatted context from retrieved parent docs
@@ -337,6 +470,11 @@ async def ask_question(
             if any(marker in full_answer.lower() for marker in _REFUSAL_MARKERS):
                 yield f"data: {json.dumps({'type': 'done', 'sources': []})}\n\n"
                 yield f"data: {json.dumps({'type': 'verification', 'verdict': 'PASS', 'score': 1.0, 'total_claims': 0, 'unverified_claims': [], 'is_faithful': True})}\n\n"
+                if body.session_id:
+                    _persist_chat_turn(
+                        db, body.session_id, current_user.id, body.question, full_answer,
+                        citations=[], verification={"verdict": "PASS", "score": 1.0, "total_claims": 0, "unverified_claims": [], "is_faithful": True},
+                    )
             else:
                 # Attribute the answer to the parents that actually supported it
                 attributed = attribute_answer_to_parents(full_answer, retrieved_docs)
@@ -363,7 +501,17 @@ async def ask_question(
                     generated_answer=full_answer,
                 )
                 unverified_claims = [c.claim_text for c in report.claims if not c.is_faithful]
-                yield f"data: {json.dumps({'type': 'verification', 'verdict': report.verdict, 'score': report.faithfulness_score, 'total_claims': len(report.claims), 'unverified_claims': unverified_claims, 'is_faithful': report.verdict == 'PASS'})}\n\n"
+                verification_payload = {
+                    "verdict": report.verdict, "score": report.faithfulness_score,
+                    "total_claims": len(report.claims), "unverified_claims": unverified_claims,
+                    "is_faithful": report.verdict == "PASS",
+                }
+                yield f"data: {json.dumps({'type': 'verification', **verification_payload})}\n\n"
+                if body.session_id:
+                    _persist_chat_turn(
+                        db, body.session_id, current_user.id, body.question, full_answer,
+                        citations=sources_metadata, verification=verification_payload,
+                    )
 
         except RateLimitError:
             yield f"data: {json.dumps({'type': 'error', 'detail': 'The AI service is temporarily rate-limited. Please wait a few seconds and try again.'})}\n\n"
@@ -386,6 +534,7 @@ MAX_COMPARE_DOCS = 20
 class CompareRequest(BaseModel):
     doc_ids: list = Field(max_length=MAX_COMPARE_DOCS)
     query: str = Field(max_length=MAX_QUESTION_LEN)
+    session_id: str | None = None
 
 
 @app.post("/compare")
@@ -403,15 +552,23 @@ async def compare_documents(
 
     _log(db, "compare", user_id=current_user.id,
          detail=f"{len(body.doc_ids)} docs · {body.query[:120]}", ip=get_client_ip(request))
+    if body.session_id:
+        _get_owned_session(db, body.session_id, current_user.id)  # 404s up front rather than mid-stream
 
     if is_off_topic_request(body.query) or is_off_topic_llm(body.query):
         coverage = {doc_id: False for doc_id in body.doc_ids}
+        canned = "I cannot answer this based on the provided documents. No relevant context was found."
 
         def refusal_stream():
             yield f"data: {json.dumps({'type': 'verification', 'coverage': coverage})}\n\n"
-            canned = "I cannot answer this based on the provided documents. No relevant context was found."
             yield f"data: {json.dumps({'type': 'token', 'content': canned})}\n\n"
             yield f"data: {json.dumps({'type': 'done', 'sources': []})}\n\n"
+            if body.session_id:
+                _persist_chat_turn(
+                    db, body.session_id, current_user.id, body.query, canned,
+                    citations=[], verification={"coverage": coverage},
+                    extra={"isComparison": True, "comparedDocs": body.doc_ids},
+                )
 
         return StreamingResponse(
             refusal_stream(),
@@ -421,8 +578,34 @@ async def compare_documents(
 
     per_doc = retrieve_per_doc(body.query, body.doc_ids, current_user.id)
 
+    def event_stream():
+        full_answer = ""
+        sources = []
+        coverage = None
+        for event in stream_comparison(body.query, per_doc):
+            yield event
+            try:
+                payload = json.loads(event[len("data: "):].strip())
+            except (ValueError, IndexError):
+                continue
+            etype = payload.get("type")
+            if etype == "token":
+                full_answer += payload.get("content", "")
+            elif etype == "done":
+                sources = payload.get("sources", [])
+            elif etype == "verification":
+                coverage = payload.get("coverage")
+
+        if body.session_id and full_answer:
+            _persist_chat_turn(
+                db, body.session_id, current_user.id, body.query, full_answer,
+                citations=sources,
+                verification={"coverage": coverage} if coverage is not None else None,
+                extra={"isComparison": True, "comparedDocs": body.doc_ids},
+            )
+
     return StreamingResponse(
-        stream_comparison(body.query, per_doc),
+        event_stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

@@ -1,45 +1,86 @@
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { nextId, formatBytes, relativeTime, loadSessions as loadSessionsForUser, saveSessions as saveSessionsForUser, loadPendingJobs as loadPendingJobsForUser, savePendingJobs as savePendingJobsForUser } from "./utils/storage.js";
+import { nextId, formatBytes, relativeTime, loadPendingJobs as loadPendingJobsForUser, savePendingJobs as savePendingJobsForUser } from "./utils/storage.js";
 import { API_BASE_URL, extractErrorMessage } from "./utils/api.js";
+import { fetchSessions, createSession, fetchSession, renameSession as renameSessionApi, updateSessionFiles, deleteSession as deleteSessionApi } from "./utils/sessionsApi.js";
 import { IcPlus, IcSearch, IcUpload, IcArrow, IcDoc, IcClose, IcMenu, IcPage, IcCheck, IcAlert, IcChat, IcCopy, IcCopied, IcDots, IcPencil, IcTrash } from "./components/icons.jsx";
 import { FileChip, TypingDots } from "./components/FileChip.jsx";
 import AdminPanel from "./components/AdminPanel.jsx";
 import ResetPasswordModal from "./components/ResetPasswordModal.jsx";
 import clauseiqMark from "./assets/clauseiq-mark.svg";
 
+// ── Server <-> frontend session/message shape mapping ────────────────────────
+// The backend returns sessions/messages in snake_case with raw retrieval
+// metadata (see app/main.py _persist_chat_turn); the UI works with the same
+// shapes handleSend/handleCompare build up live during streaming.
+const mapSession = (s) => ({
+  id: s.id,
+  name: s.name || "",
+  uploadedFiles: s.uploaded_files || [],
+  createdAt: new Date(s.created_at).getTime(),
+});
+
+const sourcesToAskCitations = (sources) => (sources || []).map((s) => ({
+  id: nextId(),
+  source: s.file,
+  pages: s.pages || (s.page != null ? [s.page] : []),
+  pageRange: s.page_range || (s.page != null ? `p. ${s.page}` : ""),
+  section: s.section || "",
+  page: s.page ?? s.pages?.[0] ?? null,
+  preview: s.content_preview || null,
+}));
+
+const sourcesToCompareCitations = (sources) => (sources || []).map((s) => ({
+  id: nextId(), source: s.file, page: s.page, preview: s.content_preview || null,
+}));
+
+const mapMessage = (m) => {
+  if (m.role !== "assistant") {
+    return { id: m.id, role: m.role, content: m.content };
+  }
+  if (m.extra?.isComparison) {
+    const coverage = m.verification?.coverage || {};
+    return {
+      id: m.id, role: "assistant", content: m.content,
+      citations: sourcesToCompareCitations(m.citations),
+      weakEvidence: Object.entries(coverage).filter(([, ok]) => !ok).map(([doc]) => doc),
+      isComparison: true,
+      comparedDocs: m.extra.comparedDocs || [],
+    };
+  }
+  return {
+    id: m.id, role: "assistant", content: m.content,
+    citations: sourcesToAskCitations(m.citations),
+    verification: m.verification ? {
+      verdict: m.verification.verdict,
+      score: m.verification.score,
+      totalClaims: m.verification.total_claims || 0,
+      unverifiedClaims: m.verification.unverified_claims || [],
+    } : null,
+  };
+};
+
 export default function Chat({ authUser, onLogout, onSessionExpired }) {
-  // Sessions are namespaced per user (see utils/storage.js) so chat history
-  // never leaks across accounts sharing the same browser.
+  // Pending-upload-job tracking stays client-side/local-storage (see utils/storage.js)
+  // — it's just enough to resume polling after a refresh, not chat history.
   const userKey = authUser?.id ?? authUser?.email ?? "anon";
-  const loadSessions = () => loadSessionsForUser(userKey);
-  const saveSessions = (arr) => saveSessionsForUser(userKey, arr);
   const loadPendingJobs = () => loadPendingJobsForUser(userKey);
   const savePendingJobs = (arr) => savePendingJobsForUser(userKey, arr);
 
-  // ── Sessions (chat history) ───────────────────────────────────────────────
-  const [sessions, setSessions] = useState(loadSessions);
-  const [activeSessionId, setActiveSessionId] = useState(() => {
-    const s = loadSessions();
-    return s.length > 0 ? s[0].id : null;
-  });
+  // ── Sessions (chat history) — persisted server-side, see utils/sessionsApi.js ──
+  const [sessions, setSessions] = useState([]);
+  const [activeSessionId, setActiveSessionId] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
 
   // ── Chat working state ────────────────────────────────────────────────────
-  const [messages, setMessages] = useState(() => {
-    const s = loadSessions();
-    return s.length > 0 ? (s[0].messages || []) : [];
-  });
+  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [attached, setAttached] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [selectedCitation, setSelectedCitation] = useState(null);
-  const [view, setView] = useState(() => {
-    const s = loadSessions();
-    return s.length > 0 && (s[0].messages?.length > 0 || s[0].uploadedFiles?.length > 0) ? "chat" : "empty";
-  });
+  const [view, setView] = useState("empty");
   const [procState, setProcState] = useState({ name: "", progress: 0 });
   const [isNarrow, setIsNarrow] = useState(false);
   const [copiedId, setCopiedId] = useState(null);
@@ -75,6 +116,31 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
       renameInputRef.current.select();
     }
   }, [editingSessionId]);
+
+  // ── Load chat history from the server on mount ───────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await fetchSessions(onSessionExpired);
+        if (cancelled) return;
+        const mapped = list.map(mapSession);
+        setSessions(mapped);
+        if (mapped.length > 0) {
+          const full = await fetchSession(mapped[0].id, onSessionExpired);
+          if (cancelled) return;
+          const msgs = (full.messages || []).map(mapMessage);
+          setActiveSessionId(mapped[0].id);
+          setMessages(msgs);
+          setView(msgs.length > 0 || mapped[0].uploadedFiles.length > 0 ? "chat" : "empty");
+        }
+      } catch {
+        // Failed to reach the backend for history — leave the empty-state view.
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── matchMedia ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -130,46 +196,44 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
   }, [attached, view]);
 
   // ── Session management ────────────────────────────────────────────────────
-  const switchSession = (id) => {
-    if (id === activeSessionId) { setSidebarOpen(false); return; }
-    const sid = activeSessionId;
-    const msgs = messagesRef.current;
-    const next = sessionsRef.current.find((s) => s.id === id);
-    // Save current session's messages, then switch
-    setSessions((prev) => {
-      const updated = prev.map((s) => (s.id === sid ? { ...s, messages: msgs } : s));
-      saveSessions(updated);
-      return updated;
-    });
+  // Sessions/messages are the server's source of truth (see utils/sessionsApi.js)
+  // — switching a session fetches its messages fresh rather than reading a
+  // locally-cached copy, since the backend already persisted the last exchange
+  // the moment /ask or /compare completed.
+  const loadSessionInto = async (id) => {
+    const full = await fetchSession(id, onSessionExpired);
+    const msgs = (full.messages || []).map(mapMessage);
     setActiveSessionId(id);
-    setMessages(next?.messages ?? []);
+    setMessages(msgs);
+    setView(msgs.length > 0 || (full.uploaded_files || []).length > 0 ? "chat" : "empty");
+  };
+
+  const switchSession = async (id) => {
+    if (id === activeSessionId) { setSidebarOpen(false); return; }
+    setSidebarOpen(false);
     setSelectedCitation(null);
     setInput("");
     setAttached([]);
-    setSidebarOpen(false);
     setSelectedDocs(new Set());
     setCompareMode(false);
-    setView(next?.messages?.length > 0 || next?.uploadedFiles?.length > 0 ? "chat" : "empty");
+    try {
+      await loadSessionInto(id);
+    } catch (err) {
+      console.error("Failed to load chat session:", err.message);
+    }
   };
 
   const newChat = () => {
-    // Reuse current session if it is already empty (avoid clutter)
-    const current = sessionsRef.current.find((s) => s.id === activeSessionId);
-    if (!current || (current.messages.length === 0 && !current.uploadedFiles?.length)) {
+    // Reuse current session if it is already empty (avoid clutter). No server
+    // session is created until the first message/upload actually lands (see
+    // handleSend/handleCompare/handleFiles), so an empty "new chat" is free.
+    const current = sessions.find((s) => s.id === activeSessionId);
+    if (!current || (messages.length === 0 && !current.uploadedFiles?.length)) {
       setView("empty"); setSidebarOpen(false); setInput(""); setAttached([]);
       setSelectedDocs(new Set()); setCompareMode(false);
       return;
     }
-    const sid = activeSessionId;
-    const msgs = messagesRef.current;
-    const newSess = { id: nextId(), name: "", messages: [], docName: null, createdAt: Date.now(), uploadedFiles: [] };
-    setSessions((prev) => {
-      const withSaved = prev.map((s) => (s.id === sid ? { ...s, messages: msgs } : s));
-      const updated = [newSess, ...withSaved];
-      saveSessions(updated);
-      return updated;
-    });
-    setActiveSessionId(newSess.id);
+    setActiveSessionId(null);
     setMessages([]);
     setSelectedCitation(null);
     setInput("");
@@ -178,22 +242,28 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
     setView("empty");
   };
 
-  const deleteSession = (id) => {
-    const remaining = sessionsRef.current.filter((s) => s.id !== id);
-    saveSessions(remaining);
+  const deleteSession = async (id) => {
+    try {
+      await deleteSessionApi(id, onSessionExpired);
+    } catch (err) {
+      console.error("Failed to delete chat session:", err.message);
+      return;
+    }
+    const remaining = sessions.filter((s) => s.id !== id);
     setSessions(remaining);
     if (id === activeSessionId) {
-      if (remaining.length > 0) {
-        const next = remaining[0];
-        setActiveSessionId(next.id);
-        setMessages(next.messages ?? []);
-        setView(next.messages?.length > 0 || next.uploadedFiles?.length > 0 ? "chat" : "empty");
-      } else {
-        setActiveSessionId(null);
-        setMessages([]);
-        setView("empty");
-      }
       setSelectedCitation(null);
+      if (remaining.length > 0) {
+        try {
+          await loadSessionInto(remaining[0].id);
+          return;
+        } catch (err) {
+          console.error("Failed to load chat session:", err.message);
+        }
+      }
+      setActiveSessionId(null);
+      setMessages([]);
+      setView("empty");
     }
   };
 
@@ -216,17 +286,18 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
     setSessionMenu({ id, x, y: rect.bottom + 5 });
   };
 
-  const saveRename = (id) => {
+  const saveRename = async (id) => {
     const trimmed = editingName.trim();
-    setSessions((prev) => {
-      const updated = prev.map((s) =>
-        s.id === id ? { ...s, name: trimmed || s.name || "Untitled chat" } : s
-      );
-      saveSessions(updated);
-      return updated;
-    });
     setEditingSessionId(null);
     setEditingName("");
+    const session = sessions.find((s) => s.id === id);
+    const name = trimmed || session?.name || "Untitled chat";
+    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, name } : s)));
+    try {
+      await renameSessionApi(id, name, onSessionExpired);
+    } catch (err) {
+      console.error("Failed to rename chat session:", err.message);
+    }
   };
 
   // ── Upload ────────────────────────────────────────────────────────────────
@@ -262,15 +333,20 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
       removePendingJob(jobId);
       if (job.status === "ready") {
         if (fileId) setAttached((prev) => prev.map((f) => (f.id === fileId ? { ...f, status: "ready" } : f)));
-        setSessions((prev) => {
-          const updated = prev.map((s) =>
-            s.id === targetSessionId
-              ? { ...s, uploadedFiles: [...(s.uploadedFiles || []), filename] }
-              : s
-          );
-          saveSessions(updated);
-          return updated;
-        });
+        // Re-fetch the session's authoritative file list before appending, rather
+        // than trusting local `sessions` state, so a concurrent/refresh-resumed
+        // poll can't clobber files another tab already recorded server-side.
+        try {
+          const current = await fetchSession(targetSessionId, onSessionExpired);
+          const nextFiles = [...(current.uploaded_files || []), filename];
+          const updated = await updateSessionFiles(targetSessionId, nextFiles, onSessionExpired);
+          const mapped = mapSession(updated);
+          setSessions((prev) => prev.some((s) => s.id === targetSessionId)
+            ? prev.map((s) => (s.id === targetSessionId ? mapped : s))
+            : [mapped, ...prev]);
+        } catch (err) {
+          console.error("Failed to save uploaded document to session:", err.message);
+        }
       } else {
         const message = job.error || "Failed to process the uploaded document.";
         if (fileId) {
@@ -313,7 +389,7 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
 
   const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
 
-  const handleFiles = (fileList) => {
+  const handleFiles = async (fileList) => {
     const all = Array.from(fileList);
     const oversized = all.filter((f) => f.size > MAX_FILE_BYTES);
     if (oversized.length > 0) {
@@ -328,42 +404,32 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
       id: nextId(), name: f.name, size: formatBytes(f.size), raw: f, status: "pending",
     }));
     setAttached((prev) => [...prev, ...newFiles]);
+    if (newFiles.length === 0) return;
 
-    if (newFiles.length > 0) {
-      const docName = newFiles[0].name;
-      setProcState({ name: docName, progress: 0 });
-      setView("processing");
+    setProcState({ name: newFiles[0].name, progress: 0 });
+    setView("processing");
 
-      const sid = activeSessionId;
-      const current = sessionsRef.current.find((s) => s.id === sid);
-      let targetSessionId;
-
-      if (!current) {
-        // No session exists at all — create one
-        const msgs = messagesRef.current;
-        const newSess = { id: nextId(), name: "", messages: [], docName, createdAt: Date.now(), uploadedFiles: [] };
-        targetSessionId = newSess.id;
-        setSessions((prev) => {
-          const updated = [newSess, ...prev];
-          saveSessions(updated);
-          return updated;
-        });
-        setActiveSessionId(newSess.id);
+    // Sessions are created lazily on the backend — this is the first thing
+    // (upload or message) to happen in a fresh "new chat", so create it now.
+    let targetSessionId = activeSessionId;
+    if (!targetSessionId) {
+      try {
+        const created = await createSession({ uploaded_files: [] }, onSessionExpired);
+        targetSessionId = created.id;
+        setSessions((prev) => [mapSession(created), ...prev]);
+        setActiveSessionId(created.id);
         setMessages([]);
-      } else {
-        // Always upload into the current active session
-        targetSessionId = sid;
-        setSessions((prev) => {
-          const updated = prev.map((s) =>
-            s.id === sid ? { ...s, docName: s.docName || docName } : s
-          );
-          saveSessions(updated);
-          return updated;
-        });
+      } catch (err) {
+        console.error("Failed to create chat session:", err.message);
+        const failedIds = new Set(newFiles.map((f) => f.id));
+        setAttached((prev) => prev.map((f) =>
+          failedIds.has(f.id) ? { ...f, status: "error", errorMessage: "Could not start a new chat session." } : f
+        ));
+        return;
       }
-
-      newFiles.forEach((f) => uploadFile(f, targetSessionId));
     }
+
+    newFiles.forEach((f) => uploadFile(f, targetSessionId));
   };
 
   const onFileInputChange     = (e) => { if (e.target.files?.length) handleFiles(e.target.files); e.target.value = ""; };
@@ -383,15 +449,10 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
         throw new Error(extractErrorMessage(body, "Delete failed"));
       }
       const remaining = (activeSess?.uploadedFiles || []).filter((f) => f !== filename);
-      setSessions((prev) => {
-        const updated = prev.map((s) =>
-          s.id === activeSessionId
-            ? { ...s, uploadedFiles: remaining }
-            : s
-        );
-        saveSessions(updated);
-        return updated;
-      });
+      await updateSessionFiles(activeSessionId, remaining, onSessionExpired);
+      setSessions((prev) => prev.map((s) =>
+        s.id === activeSessionId ? { ...s, uploadedFiles: remaining } : s
+      ));
       // If last doc removed and no conversation yet, go back to dropzone
       if (remaining.length === 0 && messagesRef.current.length === 0) {
         setView("empty");
@@ -434,7 +495,10 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ question: text, history, document_filter: activeSess?.uploadedFiles || [] }),
+        body: JSON.stringify({
+          question: text, history, document_filter: activeSess?.uploadedFiles || [],
+          session_id: sessionIdAtSend,
+        }),
       });
 
       if (!res.ok) {
@@ -464,15 +528,7 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
             );
             setMessages([...localMessages]);
           } else if (data.type === "done") {
-            const citations = (data.sources || []).map((s) => ({
-              id: nextId(),
-              source: s.file,
-              pages: s.pages || (s.page != null ? [s.page] : []),
-              pageRange: s.page_range || (s.page != null ? `p. ${s.page}` : ""),
-              section: s.section || "",
-              page: s.page ?? s.pages?.[0] ?? null,
-              preview: s.content_preview || null,
-            }));
+            const citations = sourcesToAskCitations(data.sources);
             localMessages = localMessages.map((m) =>
               m.id === assistantId ? { ...m, citations } : m
             );
@@ -507,18 +563,17 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
       setMessages([...localMessages]);
     } finally {
       setIsLoading(false);
-      // Persist exchange to the session it originated from
-      setSessions((prev) => {
-        const updated = prev.map((s) => {
-          if (s.id !== sessionIdAtSend) return s;
-          // Set name from first user message if still unnamed
-          const firstUser = localMessages.find((m) => m.role === "user");
-          const name = s.name || firstUser?.content?.slice(0, 48).trim() || "New chat";
-          return { ...s, name, messages: localMessages };
-        });
-        saveSessions(updated);
-        return updated;
-      });
+      // The backend already persisted this exchange as part of /ask — just
+      // name the session locally (and on the server) if it's still unnamed.
+      const session = sessions.find((s) => s.id === sessionIdAtSend);
+      if (session && !session.name) {
+        const firstUser = localMessages.find((m) => m.role === "user");
+        const name = firstUser?.content?.slice(0, 48).trim() || "New chat";
+        setSessions((prev) => prev.map((s) => (s.id === sessionIdAtSend ? { ...s, name } : s)));
+        renameSessionApi(sessionIdAtSend, name, onSessionExpired).catch((err) =>
+          console.error("Failed to name chat session:", err.message)
+        );
+      }
     }
   };
 
@@ -564,7 +619,7 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ doc_ids: docIds, query }),
+        body: JSON.stringify({ doc_ids: docIds, query, session_id: sessionIdAtSend }),
       });
 
       if (!res.ok) {
@@ -602,9 +657,7 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
             );
             setMessages([...localMessages]);
           } else if (data.type === "done") {
-            const citations = (data.sources || []).map((s) => ({
-              id: nextId(), source: s.file, page: s.page, preview: s.content_preview || null,
-            }));
+            const citations = sourcesToCompareCitations(data.sources);
             localMessages = localMessages.map((m) =>
               m.id === assistantId ? { ...m, citations } : m
             );
@@ -628,16 +681,17 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
       setMessages([...localMessages]);
     } finally {
       setIsComparing(false);
-      setSessions((prev) => {
-        const updated = prev.map((s) => {
-          if (s.id !== sessionIdAtSend) return s;
-          const firstUser = localMessages.find((m) => m.role === "user");
-          const name = s.name || firstUser?.content?.slice(0, 48).trim() || "Comparison";
-          return { ...s, name, messages: localMessages };
-        });
-        saveSessions(updated);
-        return updated;
-      });
+      // The backend already persisted this exchange as part of /compare — just
+      // name the session locally (and on the server) if it's still unnamed.
+      const session = sessions.find((s) => s.id === sessionIdAtSend);
+      if (session && !session.name) {
+        const firstUser = localMessages.find((m) => m.role === "user");
+        const name = firstUser?.content?.slice(0, 48).trim() || "Comparison";
+        setSessions((prev) => prev.map((s) => (s.id === sessionIdAtSend ? { ...s, name } : s)));
+        renameSessionApi(sessionIdAtSend, name, onSessionExpired).catch((err) =>
+          console.error("Failed to name chat session:", err.message)
+        );
+      }
     }
   };
 
@@ -674,7 +728,7 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
   const filteredSessions = sessions.filter((s) =>
     !searchQuery ||
     (s.name || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
-    (s.docName || "").toLowerCase().includes(searchQuery.toLowerCase())
+    (s.uploadedFiles?.[0] || "").toLowerCase().includes(searchQuery.toLowerCase())
   );
 
 
@@ -858,11 +912,11 @@ export default function Chat({ authUser, onLogout, onSessionExpired }) {
                     {!isEditing && (
                       <div style={{ fontFamily: T.mono, fontSize: 10.5, color: T.muted,
                         marginTop: 4, paddingLeft: 20, display: "flex", gap: 5, alignItems: "center" }}>
-                        {s.docName && (
+                        {s.uploadedFiles?.[0] && (
                           <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                            maxWidth: 110, flexShrink: 1 }} title={s.docName}>{s.docName}</span>
+                            maxWidth: 110, flexShrink: 1 }} title={s.uploadedFiles[0]}>{s.uploadedFiles[0]}</span>
                         )}
-                        {s.docName && <span style={{ opacity: 0.5, flexShrink: 0 }}>·</span>}
+                        {s.uploadedFiles?.[0] && <span style={{ opacity: 0.5, flexShrink: 0 }}>·</span>}
                         <span style={{ flexShrink: 0, opacity: 0.8 }}>{relativeTime(s.createdAt)}</span>
                       </div>
                     )}

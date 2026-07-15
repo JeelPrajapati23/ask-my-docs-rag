@@ -56,3 +56,39 @@ class AuditLogItem(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ChatMessageItem(BaseModel):
+    id: str
+    role: str
+    content: str
+    citations: Optional[list] = None
+    verification: Optional[dict] = None
+    extra: Optional[dict] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ChatSessionItem(BaseModel):
+    id: str
+    name: Optional[str]
+    uploaded_files: list
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ChatSessionDetail(ChatSessionItem):
+    messages: list[ChatMessageItem]
+
+
+class ChatSessionCreateRequest(BaseModel):
+    name: Optional[str] = None
+    uploaded_files: list = []
+
+
+class ChatSessionUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    uploaded_files: Optional[list] = None

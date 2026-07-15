@@ -1,6 +1,6 @@
 from datetime import datetime
 import uuid
-from sqlalchemy import Column, String, Boolean, DateTime, Integer, Text
+from sqlalchemy import Column, String, Boolean, DateTime, Integer, Text, JSON
 from sqlalchemy.orm import DeclarativeBase
 
 
@@ -45,3 +45,28 @@ class DocumentJob(Base):
     total_chunks = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ChatSession(Base):
+    """A saved chat/compare conversation, scoped to one user. Messages live in
+    ChatMessage (looked up by session_id — no ORM relationship() is used
+    anywhere in this file, so deletes/joins are done manually)."""
+    __tablename__ = "chat_sessions"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False, index=True)
+    name = Column(String, nullable=True)
+    uploaded_files = Column(JSON, nullable=False, default=list)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id = Column(String, nullable=False, index=True)
+    role = Column(String, nullable=False)  # "user" | "assistant"
+    content = Column(Text, nullable=False)
+    citations = Column(JSON, nullable=True)
+    verification = Column(JSON, nullable=True)
+    extra = Column(JSON, nullable=True)  # compare-only fields: isComparison, comparedDocs, weakEvidence
+    created_at = Column(DateTime, default=datetime.utcnow)
